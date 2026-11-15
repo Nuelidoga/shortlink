@@ -4,7 +4,6 @@
 FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
-# Uses npm ci when package-lock.json is committed (recommended), otherwise npm install.
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi \
     && npm cache clean --force
 
@@ -12,6 +11,15 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 FROM node:22-alpine
 ENV NODE_ENV=production \
     PORT=3000
+
+# Remove package managers: not needed at runtime, and they carry their own vulnerabilities.
+RUN rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx \
+           /usr/local/bin/corepack \
+           /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+           /opt/yarn-*
+
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
