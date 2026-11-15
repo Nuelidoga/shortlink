@@ -80,7 +80,7 @@ jobs:
       # Fails the pipeline if fixable HIGH/CRITICAL vulnerabilities are found.
       # For stricter supply-chain security, pin this action to a full commit SHA.
       - name: Scan API image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/shortlink-api:${{ env.IMAGE_TAG }}
           severity: CRITICAL,HIGH
@@ -88,7 +88,7 @@ jobs:
           exit-code: "1"
 
       - name: Scan frontend image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/shortlink-frontend:${{ env.IMAGE_TAG }}
           severity: CRITICAL,HIGH
