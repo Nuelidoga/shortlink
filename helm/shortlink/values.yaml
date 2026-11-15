@@ -3,8 +3,8 @@
 
 image:
   # Both values are updated automatically by the GitHub Actions pipeline on every release.
-  registry: REPLACE_ME.azurecr.io
-  tag: bootstrap
+  registry: acrshortlinkknqzj.azurecr.io
+  tag: "5e722f649b36321752ed2db4865258f45f7aae8d"
 
 api:
   port: 3000
