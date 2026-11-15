@@ -1,6 +1,11 @@
 # Unprivileged Nginx image: runs as a non-root user and listens on 8080.
 FROM nginxinc/nginx-unprivileged:stable-alpine
 
+# Apply the latest Alpine security patches (the base image can lag behind fixes).
+USER root
+RUN apk upgrade --no-cache
+USER 101
+
 # Templates in this folder are rendered with envsubst when the container starts.
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY html/ /usr/share/nginx/html/
