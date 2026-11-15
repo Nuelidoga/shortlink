@@ -1,0 +1,52 @@
+# Rendered at container start: the API_URL placeholder below is replaced from the environment.
+# Locally (docker-compose): http://api:3000
+# On Kubernetes:            http://shortlink-api:3000   (set in the Helm chart)
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    server_tokens off;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Settings for every request forwarded to the API
+    proxy_http_version 1.1;
+    proxy_ssl_server_name on;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 30s;
+
+    # Health probe for Container Apps
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location = / {
+        try_files /index.html =404;
+    }
+
+    # API metrics are for Prometheus inside the cluster only, never public.
+    location = /metrics {
+        return 404;
+    }
+
+    # API calls
+    location /api/ {
+        proxy_pass ${API_URL};
+    }
+
+    # Static files first; anything else (e.g. /Ab3dE9x) is a short code -> API redirect
+    location / {
+        try_files $uri @api;
+    }
+
+    location @api {
+        proxy_pass ${API_URL};
+    }
+}

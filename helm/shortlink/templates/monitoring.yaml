@@ -1,0 +1,29 @@
+{{- if .Values.monitoring.enabled }}
+# Tells Prometheus to scrape the API's /metrics endpoint every 15 seconds.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: shortlink-api
+  labels:
+    {{- include "shortlink.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shortlink-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+# Grafana automatically loads any ConfigMap with the label grafana_dashboard: "1".
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shortlink-dashboard
+  labels:
+    grafana_dashboard: "1"
+    {{- include "shortlink.labels" . | nindent 4 }}
+data:
+  shortlink.json: |-
+{{ .Files.Get "dashboards/shortlink.json" | indent 4 }}
+{{- end }}

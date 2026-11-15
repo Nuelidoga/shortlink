@@ -1,0 +1,45 @@
+# Settings for the ShortLink Helm chart.
+# Argo CD deploys whatever is in this file on the main branch (GitOps).
+
+image:
+  # Both values are updated automatically by the GitHub Actions pipeline on every release.
+  registry: REPLACE_ME.azurecr.io
+  tag: bootstrap
+
+api:
+  port: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 60
+  database:
+    name: shortlink
+    port: 3306
+    ssl: "true"
+    # Kubernetes Secret holding DB_HOST, DB_USER and DB_PASSWORD.
+    # Created once by scripts/create-db-secret.sh, never stored in Git.
+    secretName: shortlink-db
+
+web:
+  port: 8080
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+gateway:
+  enabled: true
+  className: eg # Envoy Gateway (installed by scripts/install-platform.sh)
+
+monitoring:
+  enabled: true # ServiceMonitor + Grafana dashboard (needs kube-prometheus-stack)

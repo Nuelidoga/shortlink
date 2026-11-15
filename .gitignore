@@ -1,0 +1,14 @@
+node_modules/
+npm-debug.log*
+.env
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+infra/backend.hcl
+
+.DS_Store

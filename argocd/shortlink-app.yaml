@@ -1,0 +1,33 @@
+# Argo CD Application: "keep the cluster in sync with helm/shortlink on the main branch".
+# Replace YOUR-GITHUB-USERNAME below, commit, then:  kubectl apply -f argocd/shortlink-app.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: shortlink
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io # deleting the app also deletes what it deployed
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Nuelidoga/shortlink.git
+    targetRevision: main
+    path: helm/shortlink
+    helm:
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc # this same cluster
+    namespace: shortlink
+  syncPolicy:
+    automated:
+      prune: true    # delete things removed from Git
+      selfHeal: true # undo manual changes made with kubectl
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

@@ -1,0 +1,47 @@
+# Run the whole stack locally:  docker compose up --build
+# Then open http://localhost:8080
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: shortlink
+      MYSQL_USER: shortlink
+      MYSQL_PASSWORD: shortlink_dev_pw     # local development only
+      MYSQL_ROOT_PASSWORD: root_dev_pw     # local development only
+    ports:
+      - "3306:3306"
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ushortlink", "-pshortlink_dev_pw"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: ./app/api
+    environment:
+      PORT: "3000"
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_NAME: shortlink
+      DB_USER: shortlink
+      DB_PASSWORD: shortlink_dev_pw
+      DB_SSL: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+  frontend:
+    build: ./app/frontend
+    environment:
+      API_URL: http://api:3000
+    depends_on:
+      - api
+    ports:
+      - "8080:8080"
+
+volumes:
+  db-data:

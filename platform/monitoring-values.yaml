@@ -1,0 +1,43 @@
+# Settings for kube-prometheus-stack (Prometheus + Grafana + exporters), sized for one small node.
+
+alertmanager:
+  enabled: false # saves memory; alert routing is a stretch goal (alert rules still show in Prometheus)
+
+grafana:
+  admin:
+    existingSecret: grafana-admin # created by scripts/install-platform.sh (random password)
+    userKey: admin-user
+    passwordKey: admin-password
+  sidecar:
+    dashboards:
+      searchNamespace: ALL # load dashboards (ConfigMaps) from every namespace, including shortlink
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 384Mi
+
+prometheus:
+  prometheusSpec:
+    retention: 3d
+    # Pick up ServiceMonitors from any namespace/release (e.g. the shortlink chart's).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1536Mi
+
+# AKS manages the control plane, so these components can't be scraped. Disabling avoids false "down" alerts.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false

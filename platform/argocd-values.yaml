@@ -1,0 +1,5 @@
+# Settings for the Argo CD Helm chart, trimmed for one small node.
+dex:
+  enabled: false # single sign-on not needed; we use the built-in admin account
+notifications:
+  enabled: false

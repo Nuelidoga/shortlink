@@ -1,0 +1,23 @@
+{
+  "name": "shortlink-api",
+  "version": "1.1.0",
+  "description": "ShortLink URL shortener API (Node.js + MySQL)",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "mysql2": "^3.11.0",
+    "prom-client": "^15.1.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0"
+  }
+}

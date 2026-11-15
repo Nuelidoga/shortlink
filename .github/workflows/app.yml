@@ -1,0 +1,117 @@
+name: App CI
+
+# CI builds, tests and scans the app, pushes images to ACR, then updates the
+# image tag in helm/shortlink/values.yaml. Argo CD sees that commit and deploys it (GitOps).
+
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", "helm/**", ".github/workflows/app.yml"]
+  pull_request:
+    paths: ["app/**", "helm/**", ".github/workflows/app.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # commit the new image tag back to the repo
+  id-token: write # passwordless (OIDC) login to Azure
+
+concurrency:
+  group: app-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  test:
+    name: Test API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Run tests
+        run: npm test
+
+  lint-chart:
+    name: Lint Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint helm/shortlink
+
+  build-and-release:
+    name: Build, scan, push, release
+    needs: [test, lint-chart]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        run: |
+          az acr login --name "$ACR_NAME"
+          echo "REGISTRY=$(az acr show --name "$ACR_NAME" --query loginServer -o tsv)" >> "$GITHUB_ENV"
+
+      - name: Build images
+        run: |
+          docker build -t "$REGISTRY/shortlink-api:$IMAGE_TAG" app/api
+          docker build -t "$REGISTRY/shortlink-frontend:$IMAGE_TAG" app/frontend
+
+      # Fails the pipeline if fixable HIGH/CRITICAL vulnerabilities are found.
+      # For stricter supply-chain security, pin this action to a full commit SHA.
+      - name: Scan API image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/shortlink-api:${{ env.IMAGE_TAG }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Scan frontend image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/shortlink-frontend:${{ env.IMAGE_TAG }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Push images
+        run: |
+          docker push "$REGISTRY/shortlink-api:$IMAGE_TAG"
+          docker push "$REGISTRY/shortlink-frontend:$IMAGE_TAG"
+
+      # GitOps hand-off: change Git, and Argo CD does the deploy.
+      - name: Update image tag in Helm values
+        run: |
+          sed -i -E \
+            -e "s|^(  registry:).*|\1 ${REGISTRY}|" \
+            -e "s|^(  tag:).*|\1 \"${IMAGE_TAG}\"|" \
+            helm/shortlink/values.yaml
+          grep -A3 '^image:' helm/shortlink/values.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add helm/shortlink/values.yaml
+          git commit -m "release: shortlink ${IMAGE_TAG:0:7}"
+          git pull --rebase origin main
+          git push origin HEAD:main
+          echo "Released ${IMAGE_TAG:0:7}. Argo CD will deploy it within ~3 minutes." >> "$GITHUB_STEP_SUMMARY"
