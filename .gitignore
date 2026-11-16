@@ -12,3 +12,4 @@ crash.log
 infra/backend.hcl
 
 .DS_Store
+docs/DEMO.md
