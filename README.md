@@ -1,251 +1,317 @@
 # ShortLink: a cloud-native URL shortener on Azure Kubernetes Service
 
-A production-style web application that is **designed, provisioned, deployed and automated** on Microsoft Azure using industry-standard DevOps tooling.
+A production-style web application that is **designed, provisioned, deployed and automated** on Microsoft Azure using industry-standard DevOps tooling, built as a Cloud/DevOps engineering capstone.
 
-**Stack:** Azure · AKS · Terraform · Docker · Helm · GitHub Actions · Argo CD (GitOps) · Gateway API (Envoy Gateway) · Prometheus · Grafana · Trivy · MySQL · OIDC
+![Azure](https://img.shields.io/badge/Azure-AKS-0078D4?logo=microsoftazure&logoColor=white)
+![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC?logo=terraform&logoColor=white)
+![Kubernetes](https://img.shields.io/badge/Kubernetes-Helm-326CE5?logo=kubernetes&logoColor=white)
+![Argo CD](https://img.shields.io/badge/GitOps-Argo%20CD-EF7B4D?logo=argo&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Monitoring-Prometheus%20%2B%20Grafana-E6522C?logo=prometheus&logoColor=white)
+
+**Stack:** Azure · AKS · Terraform · Docker · Helm · GitHub Actions · Argo CD (GitOps) · Gateway API (Envoy Gateway) · Prometheus · Grafana · k6 · Trivy · MySQL · OIDC
+
+![ShortLink running on AKS](docs/images/08-app-live.png)
+
+---
+
+## Highlights
+
+- **Infrastructure as Code:** every Azure resource (AKS, ACR, MySQL) is created by Terraform, with remote, versioned state.
+- **GitOps delivery:** GitHub Actions builds, tests and scans images, then commits the new image tag to Git. **Argo CD** deploys whatever Git says. Rollback is `git revert`.
+- **Security by default:** no cloud passwords in CI (OIDC federation), non-root read-only containers, vulnerability scanning that blocks releases, an internal-only API, TLS to the database, and immutable third-party actions.
+- **Proven under load:** **82,747 requests at about 275 req/s with 0% errors**. The API autoscaled from **1 to 4 pods** and back down automatically.
+- **Observability:** custom app metrics (traffic, errors, latency) and cluster metrics in Prometheus and Grafana.
 
 ---
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    dev([Developer]) -->|git push| repo[(GitHub repo)]
+    repo --> ci["GitHub Actions CI<br/>test · lint · build<br/>Trivy scan · push"]
+    ci -->|images| acr[(Azure Container<br/>Registry)]
+    ci -->|commit new image tag| repo
+    tf[Terraform] -.->|provisions| aks
+    tf -.->|provisions| acr
+    tf -.->|provisions| db
+
+    subgraph aks["AKS cluster (Free tier, West US 3)"]
+        argo[Argo CD]
+        gw["Envoy Gateway<br/>(Gateway API)"]
+        web["shortlink-web<br/>Nginx"]
+        api["shortlink-api<br/>Node.js · HPA 1–4"]
+        prom[Prometheus]
+        graf[Grafana]
+        gw --> web --> api
+        prom -.->|scrapes /metrics| api
+        prom --> graf
+    end
+
+    argo -->|watches helm/shortlink| repo
+    argo -->|syncs| web
+    argo -->|syncs| api
+    acr -->|pull via managed identity| aks
+    users([Users]) -->|HTTP| gw
+    api -->|TLS| db[(Azure Database for<br/>MySQL Flexible Server)]
 ```
-                         ┌──────────────────────── GitHub ─────────────────────────┐
- Developer ─ git push ─► │  GitHub Actions CI                                       │
-                         │   test → lint chart → build → Trivy scan → push to ACR   │
-                         │   → commit new image tag to helm/shortlink/values.yaml   │
-                         │  Terraform workflow: fmt → validate → plan → apply       │
-                         └──────────────┬───────────────────────────────────────────┘
-                                        │ Argo CD watches the repo (GitOps)
-┌─────────────────────────── Azure: rg-shortlink-prod ──────────────┼──────────────────┐
-│  Azure Container Registry ◄── images                              │                  │
-│                                                                   ▼                  │
-│  ┌─────────────────────── AKS cluster (Free tier, 1 node) ──────────────────────┐    │
-│  │ argocd ns:      Argo CD ──── syncs Helm chart ──► shortlink ns               │    │
-│  │ envoy-gateway:  Envoy Gateway (Gateway API) ◄── public IP ◄── Internet       │    │
-│  │ shortlink ns:   Gateway/HTTPRoute → shortlink-web (Nginx) → shortlink-api    │    │
-│  │                 (Node.js, HPA 1-4 pods) ──── TLS ────┐                       │    │
-│  │ monitoring ns:  Prometheus (scrapes /metrics) → Grafana dashboards           │    │
-│  └──────────────────────────────────────────────────────┼──────────────────────┘    │
-│                                                         ▼                           │
-│                         Azure Database for MySQL Flexible Server (B1ms)             │
-└──────────────────────────────────────────────────────────────────────────────────────┘
-               Terraform state: Azure Storage account (rg-shortlink-tfstate)
-```
+
+### How a change reaches production
+
+1. A developer pushes code to `main`.
+2. **GitHub Actions (CI)** runs the API tests, lints the Helm chart, builds both images, and **scans them with Trivy**. Any fixable HIGH or CRITICAL vulnerability **fails the build**.
+3. The images are pushed to **Azure Container Registry**, and the pipeline commits the new image tag to `helm/shortlink/values.yaml`.
+4. **Argo CD (CD)**, running inside the cluster, detects the commit and syncs the Helm chart. Kubernetes performs a **zero-downtime rolling update**.
+
+The pipeline never needs cluster credentials. Only Argo CD, inside the cluster, applies changes.
 
 ### What each tool does
 
 | Tool | Role in this project |
 |---|---|
-| **Terraform** | Creates all Azure resources (AKS, ACR, MySQL) as code, with remote state |
-| **Docker** | Packages the API and frontend as small, non-root container images |
-| **GitHub Actions** | CI: tests, lints the Helm chart, builds, scans with Trivy, pushes to ACR, updates the image tag in Git |
-| **Argo CD** | CD (GitOps): keeps the cluster in sync with the Helm chart in Git, self-heals manual changes |
-| **Helm** | Packages all Kubernetes resources for the app with one settings file (`values.yaml`) |
-| **Gateway API + Envoy Gateway** | Routes internet traffic into the cluster (successor to the retired ingress-nginx) |
-| **Prometheus + Grafana** | Collects cluster and app metrics; dashboards for traffic, errors, latency, scaling |
-| **HPA** | Adds API pods automatically when CPU is high |
-| **OIDC** | GitHub logs in to Azure with short-lived tokens; no stored cloud passwords |
+| **Terraform** | Provisions the resource group, AKS, ACR, MySQL and the AcrPull role assignment; state in Azure Storage |
+| **Docker** | Multi-stage, non-root images for the API (Node.js) and frontend (Nginx) |
+| **GitHub Actions** | CI: tests, chart lint, image build, Trivy scan, push, GitOps tag update; Terraform plan/apply |
+| **Argo CD** | GitOps CD: keeps the cluster in sync with Git, self-heals manual drift |
+| **Helm** | Packages all Kubernetes resources for the app with one `values.yaml` |
+| **Gateway API + Envoy Gateway** | Routes internet traffic into the cluster (the successor to the retired ingress-nginx) |
+| **Prometheus + Grafana** | App metrics (requests, errors, latency) and cluster metrics, with a custom dashboard |
+| **HPA** | Scales API pods on CPU (target 60%, 1–4 replicas) |
+| **k6** | Load testing, run inside the cluster |
+| **Trivy** | Container vulnerability scanning in CI |
+| **OIDC (workload identity federation)** | GitHub Actions logs in to Azure with short-lived tokens; no stored secrets |
 
-### Production practices to point out
+---
 
-- Infrastructure as Code with remote, versioned state
-- GitOps: Git is the single source of truth; rollback = `git revert`
-- Zero-downtime rolling updates (`maxUnavailable: 0`), readiness/liveness probes
-- Autoscaling (HPA) with CPU requests/limits set on every container
-- Security: non-root containers, read-only root filesystem, all Linux capabilities dropped, API not exposed publicly, `/metrics` blocked at the edge, TLS to the database, image scanning, no secrets in Git, passwordless CI login
-- Observability: app-level metrics (requests, errors, latency) + cluster metrics in Grafana
-- Cost control: AKS Free tier control plane, single burstable node, cluster stop/start, Basic ACR
+## Results
+
+### GitOps delivery
+
+Argo CD shows every Kubernetes resource the chart deploys, **Healthy** and **Synced** to the latest release commit made by the pipeline.
+
+![Argo CD: Healthy and Synced](docs/images/09-argocd-healthy-synced.png)
+
+### Load test and autoscaling
+
+**Test:** k6, 150 virtual users for 5 minutes, run **inside the cluster** (so the test measured the app, not a home internet connection).
+
+| Metric | Result |
+|---|---|
+| Total requests | **82,747** (~275 req/s) |
+| Failed requests | **0.00%** |
+| Checks passed | **100%** (list = 200, redirect = 302, create = 201) |
+| Median latency | **19 ms** |
+| p95 latency | **282 ms** (SLO: p95 < 1 s ✓) |
+| Peak CPU vs target | **196%** of the 60% target |
+| API replicas | **1 → 4 → 1** (automatic scale-up and scale-down) |
+
+**Before:** 1 API pod, CPU at 3% of target.
+![HPA baseline](docs/images/01-hpa-baseline.png)
+
+**Under load:** CPU at 196% of target, and the HPA scaled to 4 replicas within about a minute.
+![HPA at peak](docs/images/02-hpa-peak-4-replicas.png)
+
+**Grafana during the test:** about 187 req/s, p95 about 198 ms, and API replicas climbing to 4.
+![Grafana under load](docs/images/03-grafana-under-load.png)
+
+**Argo CD at peak:** the extra pods created by the HPA. The app stays **Synced**, because replica count is owned by the HPA, not Git.
+![Argo CD with scaled pods](docs/images/04-argocd-scaled-pods.png)
+
+**k6 summary:** 100% checks passed, 0% failed requests, both thresholds met.
+![k6 summary](docs/images/05a-k6-summary.png)
+![k6 summary, continued](docs/images/05b-k6-summary.png)
+
+**The full curve:** scale up to 4, then back down after the load ended.
+![Grafana scale up and down](docs/images/06-grafana-scale-up-down.png)
+
+**After:** back to 1 replica and 2% CPU. Kubernetes waits about 5 minutes before scaling down, to avoid flapping.
+![HPA scaled down](docs/images/07-hpa-scaled-down.png)
+
+> **Finding: pod autoscaling has a ceiling.** At peak, the 4th API pod stayed `Pending`, because the single node had no allocatable CPU left alongside Argo CD, Prometheus, Grafana and Envoy. The HPA scales **pods**; the **Cluster Autoscaler** scales **nodes**. Production clusters use both. This project uses one node to control cost, and the Cluster Autoscaler is listed under future improvements.
+
+---
+
+## Security
+
+| Practice | Implementation |
+|---|---|
+| No stored cloud credentials in CI | GitHub Actions authenticates to Azure with **OIDC federated identity** (short-lived tokens, scoped to this repo and branch/environment) |
+| Release blocked on vulnerabilities | **Trivy** fails the pipeline on fixable HIGH/CRITICAL CVEs |
+| Minimal images | Package managers (npm, yarn, corepack) **removed from the runtime image**; OS packages patched with `apk upgrade` |
+| Hardened containers | Non-root users, **read-only root filesystem**, all Linux capabilities dropped, seccomp `RuntimeDefault` |
+| Least exposure | API Service is **ClusterIP** (internal only); `/metrics` blocked at the public edge |
+| Secrets not in Git | DB password generated by Terraform and stored as a Kubernetes Secret created straight from Terraform outputs |
+| Encrypted DB connections | Azure MySQL enforces TLS (`require_secure_transport`); the app verifies the certificate |
+| Supply chain | Third-party actions pinned to **immutable releases** after the March 2026 trivy-action tag compromise |
+| Registry access | ACR admin user disabled; AKS pulls with its **managed identity** (AcrPull role) |
 
 ---
 
 ## Repository layout
 
 ```
-app/              API (Node.js) and frontend (Nginx) source + Dockerfiles
-infra/            Terraform: resource group, ACR, AKS, MySQL
-helm/shortlink/   Helm chart: Deployments, Services, HPA, Gateway, HTTPRoute, ServiceMonitor, dashboard
-argocd/           Argo CD Application (points Argo CD at the Helm chart)
-platform/         Settings for Envoy Gateway, Prometheus/Grafana, Argo CD
-scripts/          One-time setup scripts
-loadtest/         k6 load test
-.github/workflows CI (app.yml) and Terraform (infra.yml) pipelines
-docker-compose.yml  Run everything locally
+app/
+  api/              Node.js API (Express, mysql2, prom-client), tests, Dockerfile
+  frontend/         Static HTML/CSS/JS served by Nginx, Dockerfile
+infra/              Terraform: resource group, ACR, AKS, MySQL, role assignment
+helm/shortlink/     Helm chart: Deployments, Services, HPA, Gateway, HTTPRoute,
+                    ServiceMonitor, Grafana dashboard
+argocd/             Argo CD Application (points Argo CD at the Helm chart)
+platform/           Values for Envoy Gateway, Prometheus/Grafana, Argo CD
+scripts/            One-time setup scripts
+loadtest/           k6 load test
+docs/               Screenshots and demo guide
+.github/workflows/  app.yml (CI + GitOps release), infra.yml (Terraform)
+docker-compose.yml  Run the whole stack locally
 ```
 
 ---
 
-## Step 1: Run locally ✅
+## Running it yourself
+
+<details>
+<summary><b>1. Run locally</b></summary>
 
 ```bash
 docker compose up --build        # open http://localhost:8080
-cd app/api && npm install && npm test && cd ../..
+cd app/api && npm install && npm test
 ```
+</details>
 
----
+<details>
+<summary><b>2. Azure and GitHub setup</b></summary>
 
-## Step 2: Azure and GitHub setup
-
-On Windows, use **Git Bash**. In every new terminal, run:
-
+On Windows, use **Git Bash**, and run these in every new terminal:
 ```bash
-export MSYS_NO_PATHCONV=1                 # stop Git Bash rewriting /subscriptions/... paths
+export MSYS_NO_PATHCONV=1
 export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 ```
 
-1. **Budget alert:** Azure portal → Cost Management → Budgets → monthly $25, alerts at 50% and 90%.
-2. **Log in:** `az login`
-3. **Terraform state storage:** `bash scripts/bootstrap-state.sh northeurope`. Note the two values it prints.
-4. **GitHub repo:** create an empty **public** repo named `shortlink`. Don't push yet.
-5. **Passwordless CI login:** `bash scripts/setup-github-oidc.sh <github-username>/shortlink`. Note the three values it prints.
-6. **GitHub settings** → Secrets and variables → Actions:
+1. Create a budget alert (Cost Management → Budgets).
+2. `az login`
+3. `bash scripts/bootstrap-state.sh <region>`: creates the Terraform state storage
+4. Create a **public** GitHub repo named `shortlink`
+5. `bash scripts/setup-github-oidc.sh <github-username>/shortlink`: passwordless CI login
+6. In GitHub → Settings → Secrets and variables → Actions:
+   - **Secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
+   - **Variables:** `TFSTATE_RESOURCE_GROUP`, `TFSTATE_STORAGE_ACCOUNT`, `ACR_NAME` (added after step 3)
+</details>
 
-| Type | Name | Value |
-|---|---|---|
-| Secret | `AZURE_CLIENT_ID` | from 2.5 |
-| Secret | `AZURE_TENANT_ID` | from 2.5 |
-| Secret | `AZURE_SUBSCRIPTION_ID` | from 2.5 |
-| Variable | `TFSTATE_RESOURCE_GROUP` | from 2.3 |
-| Variable | `TFSTATE_STORAGE_ACCOUNT` | from 2.3 |
-
----
-
-## Step 3: Create the infrastructure (Terraform)
+<details>
+<summary><b>3. Provision infrastructure</b></summary>
 
 ```bash
 cd infra
 terraform init -backend-config=backend.hcl
-terraform plan          # review what will be created
-terraform apply         # about 10-15 minutes
-terraform output
+terraform plan
+terraform apply
 cd ..
-```
-
-Add one more GitHub **variable**: `ACR_NAME` = `terraform -chdir=infra output -raw acr_name`
-
-Install `kubectl` and `helm` (Windows, in PowerShell):
-```powershell
-winget install -e --id Kubernetes.kubectl
-winget install -e --id Helm.Helm
-```
-
-Connect `kubectl` to the cluster:
-```bash
 az aks get-credentials -g rg-shortlink-prod -n aks-shortlink-prod
-kubectl get nodes        # should show 1 node, STATUS Ready
+kubectl get nodes
 ```
+Check the VM size and region against your subscription's quota first: `az vm list-usage --location <region> -o table`.
+</details>
 
----
-
-## Step 4: Install the platform tools
+<details>
+<summary><b>4. Install the platform</b></summary>
 
 ```bash
-bash scripts/install-platform.sh    # Envoy Gateway, Prometheus + Grafana, Argo CD (~10 min)
-bash scripts/create-db-secret.sh    # DB connection Secret, read straight from Terraform outputs
+bash scripts/install-platform.sh    # Envoy Gateway, Prometheus + Grafana, Argo CD
+bash scripts/create-db-secret.sh    # DB connection Secret from Terraform outputs
 ```
+</details>
 
-Save the Grafana and Argo CD passwords the script prints.
+<details>
+<summary><b>5. Deploy with GitOps</b></summary>
 
----
+1. Set your GitHub username in `argocd/shortlink-app.yaml`.
+2. Push to `main`. CI builds, scans and pushes the images and commits the new tag.
+3. `git pull`, then `kubectl apply -f argocd/shortlink-app.yaml`
+4. Get the public IP: `kubectl get gateway shortlink -n shortlink -o jsonpath='{.status.addresses[0].value}'`
+</details>
 
-## Step 5: Deploy with GitOps
+<details>
+<summary><b>6. Dashboards and load test</b></summary>
 
-1. In `argocd/shortlink-app.yaml`, replace `YOUR-GITHUB-USERNAME`.
-2. Push the code. The **App CI** workflow builds the images and commits the new image tag:
-   ```bash
-   git init -b main
-   git add .
-   git commit -m "ShortLink on AKS"
-   git remote add origin https://github.com/<github-username>/shortlink.git
-   git push -u origin main
-   ```
-3. Wait for the workflow to finish (GitHub → Actions), then pull its commit: `git pull`
-4. Tell Argo CD about the app:
-   ```bash
-   kubectl apply -f argocd/shortlink-app.yaml
-   kubectl get pods -n shortlink --watch      # wait for Running and READY 1/1, then Ctrl+C
-   ```
-5. Get the public IP and open it in a browser:
-   ```bash
-   kubectl get gateway shortlink -n shortlink -o jsonpath='{.status.addresses[0].value}'; echo
-   ```
-
-From now on, **every push to `app/` deploys automatically**: CI → new tag in Git → Argo CD syncs.
-
----
-
-## Step 6: Dashboards, monitoring and load testing
-
-Each command below runs until you press Ctrl+C. Use a separate terminal for each.
-
+Run each port-forward in its **own terminal** and leave it running:
 ```bash
-# Argo CD UI → https://localhost:8081   (user: admin; accept the certificate warning)
-kubectl port-forward svc/argocd-server -n argocd 8081:443
-
-# Grafana → http://localhost:3001   (user: admin) → Dashboards → "ShortLink - Application Overview"
-kubectl port-forward svc/monitoring-grafana -n monitoring 3001:80
-
-# Prometheus → http://localhost:9090
-kubectl port-forward svc/monitoring-kube-prometheus-prometheus -n monitoring 9090:9090
+kubectl port-forward svc/monitoring-grafana -n monitoring 3001:80      # http://localhost:3001
+kubectl port-forward svc/argocd-server -n argocd 8081:443              # https://localhost:8081
 ```
 
-Load test and watch autoscaling (install k6 with `winget install k6`):
+Watch the autoscaler:
 ```bash
-k6 run -e BASE_URL=http://<gateway-ip> loadtest/load-test.js
-kubectl get hpa,pods -n shortlink --watch      # in another terminal
+while true; do clear; date; kubectl get hpa,pods -n shortlink; sleep 5; done
 ```
 
----
-
-## Demo script (about 10 minutes)
-
-1. **Architecture:** the diagram above.
-2. **Terraform:** `infra/` and the resources in the Azure portal.
-3. **GitOps deploy:** change the heading in `app/frontend/html/index.html`, push, and show: GitHub Actions (tests, Trivy) → the commit updating `values.yaml` → Argo CD syncing → the new version live.
-4. **Self-healing:** `kubectl delete pod -n shortlink -l app.kubernetes.io/name=shortlink-api`, and Kubernetes replaces it. `kubectl scale deploy shortlink-web -n shortlink --replicas=3`, and Argo CD changes it back to match Git.
-5. **Rollback:** `git revert HEAD && git push`, and Argo CD rolls back.
-6. **Autoscaling:** k6 load test + HPA + the Grafana dashboard.
-7. **Security:** non-root/read-only containers, internal-only API, OIDC, Trivy, secrets not in Git.
-
----
-
-## Cost control
-
+Run the load test **inside the cluster**:
 ```bash
-# Stop when not working (stops node and MySQL compute billing)
-az aks stop -g rg-shortlink-prod -n aks-shortlink-prod
-az mysql flexible-server stop -g rg-shortlink-prod -n $(terraform -chdir=infra output -raw mysql_server_name)
-
-# Start again (about 5 minutes)
-az aks start -g rg-shortlink-prod -n aks-shortlink-prod
-az mysql flexible-server start -g rg-shortlink-prod -n $(terraform -chdir=infra output -raw mysql_server_name)
-
-# After grading: delete everything
-terraform -chdir=infra destroy
-az group delete -n rg-shortlink-tfstate --yes
+kubectl run k6-load -n shortlink --rm -i --restart=Never --image=grafana/k6:latest -- \
+  run --stage 30s:50 --stage 4m:150 --stage 30s:0 \
+  -e BASE_URL=http://shortlink-web:8080 - < loadtest/load-test.js
 ```
+</details>
 
 ---
 
-## Troubleshooting
+## Cost management
 
-| Problem | Fix |
+| Decision | Effect |
 |---|---|
-| Error mentioning `C:/Program Files/Git/subscriptions/...` | Run `export MSYS_NO_PATHCONV=1` in this terminal. |
-| Region, quota or `SkuNotAvailable` error in `terraform apply` | Change `location` or `node_vm_size` (e.g. `Standard_B2s_v2`, `Standard_D2s_v5`) in `infra/terraform.tfvars`. |
-| Pods in `ImagePullBackOff` | CI hasn't run yet, or `values.yaml` still says `REPLACE_ME`. Check GitHub Actions, then `git pull`. |
-| API pod `Running` but `0/1` READY | Can't reach MySQL. Is MySQL started? Is the Secret right? `kubectl logs -n shortlink deploy/shortlink-api` |
-| `CreateContainerConfigError` | The `shortlink-db` Secret is missing. Run `scripts/create-db-secret.sh`. |
-| Gateway has no IP address | `kubectl get gateway -n shortlink` and `kubectl get pods -n envoy-gateway-system`. Allow 1-2 minutes. |
-| No data in the Grafana ShortLink dashboard | Visit the site a few times first. In Prometheus → Status → Targets, check that `shortlink-api` is UP. |
-| CI fails at "Update image tag" (push rejected) | A branch protection rule is blocking the bot. Allow GitHub Actions to push to `main`. |
+| AKS **Free tier** | No charge for the control plane; only the node VM is billed |
+| **One** burstable node (`Standard_B2s_v2`, 2 vCPU / 8 GB) | Smallest size that fits the app, Argo CD and monitoring |
+| ACR **Basic**, MySQL **Burstable B1ms** | Cheapest tiers |
+| Stop when idle | `az aks stop` and `az mysql flexible-server stop` between work sessions |
+| Budget alert | Email alerts at 50% and 90% of a monthly budget |
+| Tear down | `terraform -chdir=infra destroy` after the project |
+
+```bash
+# Stop / start
+az aks stop  -g rg-shortlink-prod -n aks-shortlink-prod
+az aks start -g rg-shortlink-prod -n aks-shortlink-prod
+# After a start, if pods show ImagePullBackOff: kubectl delete pod -n shortlink --all
+```
 
 ---
 
-## Stretch goals
+## Challenges & solutions
 
-- HTTPS: custom domain + cert-manager + Let's Encrypt on the Gateway
-- Azure Key Vault + Secrets Store CSI driver + Workload Identity for the DB password
-- Alertmanager → email/Slack alerts
-- Argo CD "app of apps" to manage the platform tools via GitOps too
-- Private MySQL access via VNet integration
-- Staging environment (a second values file / Argo CD Application)
+Real problems hit while building this project, and how each was solved.
+
+| # | Problem | Root cause | Fix | Lesson |
+|---|---|---|---|---|
+| 1 | AKS failed: VM size not allowed in region | Per-subscription VM size restrictions | Picked an allowed size with the same specs (`Standard_B2s_v2`) | Error messages often contain the fix |
+| 2 | `InsufficientVCPUQuota`: 0 vCPUs for the BSv2 family | New subscriptions start with low quotas | Compared quotas across regions with `az vm list-usage` and moved to West US 3 | Quotas are per VM family per region; plan for upgrade surge nodes |
+| 3 | Plan showed 5/3 instead of 7/5 when changing region | Child resources referenced the parent by an *unchanging name* | `terraform apply -replace=...` for the database and firewall rule | Always read the plan; `replace_triggered_by` fixes it in code |
+| 4 | Apply and Helm installs failed with connection resets | Unstable local connection | Checked real state first (`az aks show`, `helm status`, state lock) before retrying | Never blindly re-run; verify what exists |
+| 5 | OIDC login rejected (`AADSTS700213`) | GitHub's token subject included immutable owner and repo IDs | Registered credentials matching the exact subject; the script now registers both formats | Match the presented subject exactly; IDs block repo-name takeover |
+| 6 | `trivy-action@0.28.0` not found | Tag removed after the March 2026 supply-chain attack | Moved to the immutable `v0.36.0` release | Pin actions to immutable releases or SHAs; OIDC meant no long-lived secrets to steal |
+| 7 | Trivy: 10 HIGH CVEs in the API image | All inside **npm**, bundled in the base image, unused at runtime | Removed package managers from the runtime stage | Remove what you don't need; analyse, don't suppress |
+| 8 | Trivy: 1 CRITICAL + 12 HIGH in the frontend image | Base image older than Alpine's security fixes | `apk upgrade` during build + `stable-alpine` tag | Patch what you do need; rebuild images regularly |
+| 9 | `az acr login` rejected the registry name | `ACR_NAME` variable never created, so the name was empty | Added the variable, re-ran failed jobs | Check inputs first when an error looks odd |
+| 10 | `ImagePullBackOff` (401) after a cluster restart | New node's managed identity not ready for first pulls; back-off delays | Verified AcrPull was correct, then recreated the pods | Verify permissions before changing them; timing matters |
+| 11 | 4th autoscaled pod stayed `Pending` | Single node out of allocatable CPU | Documented; Cluster Autoscaler is the production fix | HPA scales pods, the Cluster Autoscaler scales nodes |
+| 12 | Result box visible before any link was created | `display:flex` overrode the HTML `hidden` attribute | `[hidden] { display: none !important; }`, shipped via GitOps | Small fixes go through the same audited pipeline |
+
+---
+
+## Future improvements
+
+- **Cluster Autoscaler** (e.g. 1–3 nodes) so scaled pods always fit
+- **HTTPS** with a custom domain, cert-manager and Let's Encrypt on the Gateway
+- **Azure Key Vault** + Secrets Store CSI driver + Workload Identity for the DB password
+- **Private networking** for MySQL (VNet integration, no public endpoint)
+- **Alertmanager** routing alerts to email or Slack
+- **Least-privilege CI identity** scoped to the project's resource groups
+- Argo CD **app-of-apps** so the platform tools are also managed by GitOps
+- **Staging environment** with promotion to production via pull request
+- **Scheduled weekly image rebuilds** to pick up base-image security patches
+- **User accounts**, so each user sees only their own links
+
+---
+
+## Author
+
+**Emmanuel Idoga**: Cloud / DevOps Engineer
+GitHub: [@Nuelidoga](https://github.com/Nuelidoga)
